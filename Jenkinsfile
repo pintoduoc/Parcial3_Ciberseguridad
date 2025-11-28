@@ -1,133 +1,81 @@
 pipeline {
     agent any
-    
+
     environment {
-        FLASK_APP = 'vulnerable_app (2).py'
-        FLASK_ENV = 'development'
+        PROJECT_NAME = "pipeline-test"
+        SONARQUBE_URL = "http://sonarqube:9000"
+        SONARQUBE_TOKEN = "sqa_cec3213277a034710b91c3f3e71abe01e70832d2"
+        TARGET_URL = "http://172.28.194.122:5000"
     }
-    
+
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-        
-        stage('Setup Python') {
-            steps {
-                script {
-                    // Instalar Python si es necesario (depende de tu entorno Jenkins)
-                    sh 'python --version || echo "Python not installed"'
-                }
-            }
-        }
-        
-        stage('Install Dependencies') {
+        stage('Install Python') {
             steps {
                 sh '''
-                    python -m pip install --upgrade pip
+                    apt update
+                    apt install -y python3 python3-venv python3-pip
+                '''
+            }
+        }
+        
+        stage('Setup Environment') {
+            steps {
+                sh '''
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install --upgrade pip
                     pip install -r requirements.txt
                 '''
             }
         }
-        
-        stage('Code Analysis') {
+        stage('Python Security Audit') {
             steps {
-                script {
-                    // Análisis básico de código (opcional)
-                    sh 'python -m py_compile "${FLASK_APP}" || echo "Compilation check completed"'
-                }
-            }
-        }
-        
-        stage('Security Scan') {
-            steps {
-                script {
-                    // Escaneo básico de seguridad (puedes agregar herramientas como bandit)
-                    echo "Running basic security checks..."
-                    // sh 'pip install bandit'
-                    // sh 'bandit -r . -f html -o security_report.html || true'
-                }
-            }
-        }
-        
-        stage('Test Application') {
-            steps {
-                script {
-                    // Verificar que la aplicación puede iniciarse
-                    sh '''
-                        # Verificar que el archivo principal existe
-                        if [ ! -f "${FLASK_APP}" ]; then
-                            echo "ERROR: Application file not found!"
-                            exit 1
-                        fi
-                        
-                        # Verificar sintaxis básica de Python
-                        python -m py_compile "${FLASK_APP}"
-                        echo "✓ Application syntax is valid"
-                    '''
-                }
-            }
-        }
-        
-        stage('Deploy to Test') {
-            steps {
-                script {
-                    echo "Deploying application to test environment..."
-                    // Aquí puedes agregar pasos específicos de despliegue
-                    // como copiar archivos a un servidor de prueba
-                    
-                    // Ejemplo: Iniciar la aplicación en background para testing
-                    sh '''
-                        nohup python "${FLASK_APP}" > flask_app.log 2>&1 &
-                        echo $! > flask_app.pid
-                        sleep 5
-                        
-                        # Verificar que la aplicación está corriendo
-                        if ps -p $(cat flask_app.pid) > /dev/null; then
-                            echo "✓ Application started successfully"
-                            # Detener la aplicación después de la verificación
-                            kill $(cat flask_app.pid)
-                        else
-                            echo "✗ Application failed to start"
-                            exit 1
-                        fi
-                    '''
-                }
-            }
-        }
-    }
-    
-    post {
-        always {
-            script {
-                // Limpieza: asegurarse de que la aplicación se detenga
                 sh '''
-                    if [ -f flask_app.pid ]; then
-                        kill $(cat flask_app.pid) 2>/dev/null || true
-                        rm -f flask_app.pid
-                    fi
-                    rm -f flask_app.log 2>/dev/null || true
+                    . venv/bin/activate
+                    pip install pip-audit
+                    mkdir -p dependency-check-report
+                    pip-audit -r requirements.txt -f markdown -o dependency-check-report/pip-audit.md || true
                 '''
             }
-            
-            // Publicar reportes (opcional)
-            publishHTML([
-                allowMissing: true,
-                alwaysLinkToLastBuild: true,
-                keepAll: true,
-                reportDir: '',
-                reportFiles: 'security_report.html',
-                reportName: 'Security Report'
-            ])
         }
         
-        success {
-            echo 'Pipeline completed successfully!'
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarQubeScanner'
+                    withSonarQubeEnv('SonarQubeScanner') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                                -Dsonar.projectKey=$PROJECT_NAME \
+                                -Dsonar.sources=. \
+                                -Dsonar.host.url=$SONARQUBE_URL \
+                                -Dsonar.login=$SONARQUBE_TOKEN
+                        """
+                    }
+                }
+            }
         }
-        
-        failure {
-            echo 'Pipeline failed!'
+        stage('Dependency Check') {
+            environment {
+                NVD_API_KEY = credentials('nvdApiKey')
+            }
+            steps {
+                dependencyCheck additionalArguments: "--scan . --format HTML --out dependency-check-report --enableExperimental --enableRetired --nvdApiKey ${NVD_API_KEY}", odcInstallation: 'DependencyCheck'
+            }
+        }
+
+        stage('Publish Reports') {
+            steps {
+                publishHTML([
+                    allowMissing: false,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'dependency-check-report',
+                    reportFiles: 'dependency-check-report.html',
+                    reportName: 'OWASP Dependency Check Report'
+                ])
+            }
         }
     }
+
 }
